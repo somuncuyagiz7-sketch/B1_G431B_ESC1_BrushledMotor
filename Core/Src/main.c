@@ -108,10 +108,13 @@ void set_motor_speed(int8_t speed_percent) {
 }
 
 void ADC_Select_Channel(ADC_HandleTypeDef *hadc, uint32_t channel) {
+    // 1. Force the ADC to stop any ongoing background processes
+    HAL_ADC_Stop(hadc); 
+
     ADC_ChannelConfTypeDef sConfig = {0};
     sConfig.Channel = channel;
-    sConfig.Rank = ADC_REGULAR_RANK_1; // Force this channel to be the first one read
-    sConfig.SamplingTime = ADC_SAMPLETIME_47CYCLES_5; // Standard sampling time
+    sConfig.Rank = ADC_REGULAR_RANK_1; 
+    sConfig.SamplingTime = ADC_SAMPLETIME_47CYCLES_5; 
     sConfig.SingleDiff = ADC_SINGLE_ENDED;
     sConfig.OffsetNumber = ADC_OFFSET_NONE;
     sConfig.Offset = 0;
@@ -180,14 +183,6 @@ int main(void)
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
 
   // 4. Start Phase V (OUT2) PWM
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
-
-  // Start Phase U (OUT1)
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-
-  // Start Phase V (OUT2)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
 
@@ -261,34 +256,60 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   // Check if the interrupt was triggered by TIM6
   if (htim->Instance == TIM6) 
   {
-      // 1. Read Current Sensor
-      HAL_ADC_Start(&hadc2);
-      if (HAL_ADC_PollForConversion(&hadc2, 1) == HAL_OK) {
-          uint32_t adc2_raw = HAL_ADC_GetValue(&hadc2);
-          current_raw = adc2_raw - 2540;
-          current_mA = (float)(current_raw) * 16.786f;
-      }
-
-      // 2. Explicitly select Channel 11 (Potentiometer) on ADC1
+      // ---------------------------------------------------------
+      // 1. READ POTENTIOMETER & SET SPEED
+      // ---------------------------------------------------------
+      // Explicitly select Channel 11 (Potentiometer) on ADC1
       ADC_Select_Channel(&hadc1, ADC_CHANNEL_11);
-      
-      // 3. Trigger the ADC conversion
       HAL_ADC_Start(&hadc1);
       
-      // 4. Wait for the conversion to finish
       if (HAL_ADC_PollForConversion(&hadc1, 1) == HAL_OK) {
           uint32_t adc_val = HAL_ADC_GetValue(&hadc1);
           
-          // 5. Map 0 - 4095 to a range of -100 to 100
           target_speed = ((adc_val * 200) / 4095) - 100;
-          
-          // Apply deadband
           if (target_speed > -5 && target_speed < 5) {
               target_speed = 0;
           }
-          
-          // Drive the motor
           set_motor_speed(target_speed);
+      }
+
+      // ---------------------------------------------------------
+      // 2. READ THE CORRECT CURRENT SHUNT BASED ON DIRECTION
+      // ---------------------------------------------------------
+      if (target_speed > 0) 
+      {
+          // FORWARD: Current goes to ground via Phase V (ADC2 / OPAMP2)
+          HAL_ADC_Start(&hadc2);
+          if (HAL_ADC_PollForConversion(&hadc2, 1) == HAL_OK) {
+              uint32_t adc2_raw = HAL_ADC_GetValue(&hadc2);
+              
+              current_raw = adc2_raw - 2540; // Use your Phase V offset
+              //if (current_raw < 0) current_raw = 0; // Prevent noise from showing negative
+              
+              current_mA = (float)(current_raw) * 16.786f;
+          }
+      }
+      else if (target_speed < 0) 
+      {
+          // REVERSE: Current goes to ground via Phase U (ADC1 / OPAMP1)
+          // Switch ADC1 to read OPAMP1 (Channel 3)
+          ADC_Select_Channel(&hadc1, ADC_CHANNEL_3);
+          HAL_ADC_Start(&hadc1);
+          
+          if (HAL_ADC_PollForConversion(&hadc1, 1) == HAL_OK) {
+              uint32_t adc1_raw = HAL_ADC_GetValue(&hadc1);
+              
+              current_raw = adc1_raw - 2540; // NOTE: Phase U might have a slightly different offset than Phase V!
+             // if (current_raw < 0) current_raw = 0;
+              
+              current_mA = (float)(current_raw) * 16.786f;
+          }
+      }
+      else 
+      {
+          // COAST/STOPPED
+          current_raw = 0;
+          current_mA = 0.0f;
       }
   }
 }
